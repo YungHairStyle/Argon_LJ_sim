@@ -92,6 +92,8 @@ def main():
         slice_thickness=1.5,
         slice_offsets=[-1.0, 0.0, 1.0, 2.0],
         density_bin_width=0.1,
+        # if you want non-default vapor region:
+        # vapor_region_fraction=0.25,   # top 25% instead of 20%
     )
     analyzer.run_all()
 
