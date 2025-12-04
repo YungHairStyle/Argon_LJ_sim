@@ -254,3 +254,32 @@ def slice_masks_by_z(
         masks.append(mask)
 
     return masks
+
+# -------------------------------------------------------
+# MB distribution fit utility
+# -------------------------------------------------------
+
+def maxwell_boltzmann_speed_pdf(v, T, mass=1.0, k_B=1.0):
+    """
+    Maxwell–Boltzmann speed distribution in 3D.
+
+    Parameters
+    ----------
+    v : array_like
+        Speeds at which to evaluate the PDF.
+    T : float
+        Temperature (same units as k_B).
+    mass : float, optional
+        Particle mass (default 1.0 in LJ reduced units).
+    k_B : float, optional
+        Boltzmann constant (default 1.0 in LJ reduced units).
+
+    Returns
+    -------
+    pdf : ndarray
+        Probability density f(v).
+    """
+    v = np.asarray(v)
+    prefactor = 4.0 * np.pi * (mass / (2.0 * np.pi * k_B * T)) ** 1.5
+    pdf = prefactor * v**2 * np.exp(-mass * v**2 / (2.0 * k_B * T))
+    return pdf

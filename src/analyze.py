@@ -43,6 +43,7 @@ from aux_analyze import (
     legal_kvecs_2d,         # 2D k vectors
     calc_av_sk_2d,          # 2D S(k)
     slice_masks_by_z,
+    maxwell_boltzmann_speed_pdf
 )
 
 
@@ -216,6 +217,93 @@ class Analysis:
             f"<E_tot> = {self.Etot_mean:.4f} ± {self.Etot_err:.4f}"
         )
 
+
+        # --------------------------------------------------
+        # Velocity distribution with Maxwell–Boltzmann overlay
+        # --------------------------------------------------
+        
+        def plot_velocity_distribution_with_MB(
+            self,
+            velocities,
+            T: float = None,
+            mass: float = 1.0,
+            n_bins: int = 50,
+            stem: str = None,
+        ):
+            """
+            Plot histogram of speeds from a velocity array and overlay
+            the Maxwell–Boltzmann speed distribution.
+
+            Parameters
+            ----------
+            velocities : ndarray
+                Shape (n_steps, N, 3), (N, 3), or (N,).
+            T : float, optional
+                Temperature. If None, uses self.T_mean if available.
+            mass : float, optional
+                Particle mass (LJ units: default 1.0).
+            n_bins : int, optional
+                Number of histogram bins.
+            stem : str, optional
+                Figure name stem; default uses 'vel_MB_{mode}'.
+            """
+            v = np.asarray(velocities)
+
+            # Convert to speeds
+            if v.ndim == 3:
+                # (n_steps, N, 3)
+                speeds = np.linalg.norm(v, axis=-1).ravel()
+            elif v.ndim == 2:
+                # (N, 3)
+                speeds = np.linalg.norm(v, axis=-1)
+            elif v.ndim == 1:
+                # already speeds
+                speeds = v
+            else:
+                raise ValueError(
+                    "velocities must have shape (n_steps, N, 3), (N, 3), or (N,)"
+                )
+
+            # Temperature to use
+            if T is None:
+                if hasattr(self, "T_mean"):
+                    T_use = float(self.T_mean)
+                else:
+                    # estimate from velocities: <v^2> = 3 k_B T / m
+                    v2_mean = np.mean(speeds**2)
+                    T_use = v2_mean * mass / (3.0 * 1.0)  # k_B = 1 in LJ units
+            else:
+                T_use = float(T)
+
+            # Build histogram
+            fig, ax = plt.subplots()
+
+            counts, bin_edges, _ = ax.hist(
+                speeds,
+                bins=n_bins,
+                density=True,
+                alpha=0.6,
+                edgecolor="black",
+                label="MD speeds",
+            )
+
+            # MB on bin centers
+            v_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+            mb_pdf = maxwell_boltzmann_speed_pdf(v_centers, T=T_use, mass=mass, k_B=1.0)
+
+            ax.plot(v_centers, mb_pdf, linewidth=2, label="Maxwell–Boltzmann")
+
+            ax.set_xlabel(r"Speed $v$ (reduced units)")
+            ax.set_ylabel(r"Probability density $f(v)$")
+            ax.set_title(f"{self.mode.upper()} - velocity distribution vs MB")
+            ax.legend()
+
+            fig.tight_layout()
+
+            stem = stem or f"vel_MB_{self.mode}"
+            savefig(str(self.fig_dir), stem)
+
+            plt.close(fig)
 
     # --------------------------------------------------
     # 3D structure: g(r) and S(k)
@@ -437,6 +525,8 @@ class Analysis:
             stem = f"slab_scan_offset_{offset:.2f}".replace(".", "p")
             savefig(out_dir, stem)
             plt.close()
+    
+
 
 
 # ------------------------------------------------------
