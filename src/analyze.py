@@ -193,7 +193,7 @@ class Analysis:
     ):
         """
         Plot histograms of speeds from a velocity array and overlay
-        the Maxwell–Boltzmann speed distribution for one or more
+        the Maxwell Boltzmann speed distribution for one or more
         time windows.
         """
 
@@ -209,7 +209,7 @@ class Analysis:
         # -------------------- MB distribution helper --------------------
         def mb_speed_pdf(v_vals, T_local):
             """
-            Maxwell–Boltzmann speed distribution in 3D:
+            Maxwell Boltzmann speed distribution in 3D:
             f(v) = 4π ( m / (2π k_B T) )^{3/2} v^2 exp( - m v^2 / (2 k_B T) )
             with k_B = 1 (LJ units).
             """
@@ -270,7 +270,7 @@ class Analysis:
             ax.legend()
             fig.tight_layout()
 
-            base_stem = stem or f"vel_MB_{self.mode}"
+            base_stem = f"vel_MB_{self.mode}"
             slice_stem = f"{base_stem}_f{t:.2f}-{t+dt:.2f}"
             savefig(str(self.fig_dir), slice_stem)
 
