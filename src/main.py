@@ -96,6 +96,7 @@ def main():
         # vapor_region_fraction=0.25,   # top 25% instead of 20%
     )
     analyzer.run_all()
+    analyzer.plot_velocity_distribution_with_MB(dt=5 , frac_slices=[0.1,0.6,0.9])
 
 
 

@@ -12,3 +12,4 @@ sim.run()
 # 2) Run analysis
 analyzer = Analysis()
 analyzer.run_all()
+analyzer.plot_velocity_distribution_with_MB()

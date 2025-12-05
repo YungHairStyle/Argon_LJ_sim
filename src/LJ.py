@@ -85,6 +85,7 @@ class LJSimulation:
         self.Lz = Lz
         self.title = title or f"Argon-{self.mode}"
 
+
         os.makedirs(self.data_dir, exist_ok=True)
 
     def _initial_state(self):
@@ -126,7 +127,7 @@ class LJSimulation:
         """
         r, v, disp, dist, box, slab_mode = self._initial_state()
 
-        times, epots, ekins, temps = [], [], [], []
+        times, epots, ekins, temps, vels = [], [], [], [], []
 
         def apply_thermostat(vv):
             if self.prob > 0.0:
@@ -166,6 +167,8 @@ class LJSimulation:
                     epots.append(U)
                     ekins.append(K)
                     temps.append((2.0 * K) / (3.0 * N))
+                    vels.append(v)
+
 
                     write_gro_frame(
                         traj_file, r, box, title=f"{self.title} step {step}"
@@ -206,8 +209,8 @@ class LJSimulation:
 
         with open(save_thermo, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["time", "E_pot", "E_kin", "T"])
-            for row in zip(times, epots, ekins, temps):
+            w.writerow(["time", "E_pot", "E_kin", "T", "vels"])
+            for row in zip(times, epots, ekins, temps, vels):
                 w.writerow(row)
         print(f"[save] Wrote {save_thermo}")
 
@@ -220,50 +223,3 @@ class LJSimulation:
             "traj_path": traj_path,
         }
 
-
-# ---- Backwards-compatible functional wrapper ----
-
-def run_md(
-    mode,
-    cells_x,
-    cells_y,
-    layers_z,
-    cells_bulk,
-    a,
-    T,
-    mass,
-    rc,
-    dt,
-    steps,
-    equil_steps,
-    prob,
-    seed,
-    sample_every,
-    data_dir,
-    Lz=None,
-    title=None,
-):
-    """
-    Old API wrapper so existing calls LJ.run_md(...) still work.
-    """
-    sim = LJSimulation(
-        mode=mode,
-        cells_x=cells_x,
-        cells_y=cells_y,
-        layers_z=layers_z,
-        cells_bulk=cells_bulk,
-        a=a,
-        T=T,
-        mass=mass,
-        rc=rc,
-        dt=dt,
-        steps=steps,
-        equil_steps=equil_steps,
-        prob=prob,
-        seed=seed,
-        sample_every=sample_every,
-        data_dir=data_dir,
-        Lz=Lz,
-        title=title,
-    )
-    return sim.run()

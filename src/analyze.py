@@ -14,21 +14,14 @@ Public API:
         fig_dir="figures/slab",
     )
     analyzer.run_all()
-
-Also provides a backwards-compatible function:
-
-    analyze_trajectory(...)
-
-for old code.
+    analyzer.plot_velocity_distribution_with_MB()
 """
 
 import os
 from pathlib import Path
-
 import numpy as np
 import matplotlib.pyplot as plt
-
-from aux_analyze import (
+from aux import (
     read_thermo_csv,
     read_gro,
     savefig,
@@ -43,7 +36,6 @@ from aux_analyze import (
     legal_kvecs_2d,         # 2D k vectors
     calc_av_sk_2d,          # 2D S(k)
     slice_masks_by_z,
-    maxwell_boltzmann_speed_pdf
 )
 
 
@@ -114,35 +106,6 @@ class Analysis:
         self._thermo = None
         self._pos = None
         self._box = None
-
-    # --------------------------------------------------
-    # Public API
-    # --------------------------------------------------
-
-    def run_all(self):
-        """
-        Run the full analysis:
-
-        - Thermodynamics (T(t), energies)
-        - 3D g(r) and S(k)
-
-        For slabs (mode == "slab"), also:
-        - 1D density profile rho(z)
-        - slab scan: 2D g_xy(r) and 2D S_xy(k) for multiple z-slices
-        """
-        self._load_thermo()
-        self._load_structure()
-
-        self._plot_temperature_and_energy()
-        self._plot_gr_and_sk_3d()
-
-        if self.mode == "slab":
-            if self.enable_density_profile:
-                self._plot_density_profile_z()
-            if self.enable_slab_scan:
-                self._run_slab_scan()
-            if self.enable_vapor_pressure:
-                self._compute_vapor_pressure()
 
     # --------------------------------------------------
     # Internal loading
@@ -222,86 +185,94 @@ class Analysis:
         # Velocity distribution with Maxwell–Boltzmann overlay
         # --------------------------------------------------
         
-        def plot_velocity_distribution_with_MB(
-            self,
-            velocities,
-            T: float = None,
-            mass: float = 1.0,
-            n_bins: int = 50,
-            stem: str = None,
-        ):
+    def plot_velocity_distribution_with_MB(
+        self,
+        dt: int = 5,
+        mass: float = 1.0,
+        frac_slices=None,
+    ):
+        """
+        Plot histograms of speeds from a velocity array and overlay
+        the Maxwell–Boltzmann speed distribution for one or more
+        time windows.
+        """
+
+        self._load_thermo()
+        self._load_structure()
+
+        velocities = self._thermo["vels"]
+        T = self._thermo["T"]
+
+
+        v = np.asarray(velocities)
+
+        # -------------------- MB distribution helper --------------------
+        def mb_speed_pdf(v_vals, T_local):
             """
-            Plot histogram of speeds from a velocity array and overlay
-            the Maxwell–Boltzmann speed distribution.
-
-            Parameters
-            ----------
-            velocities : ndarray
-                Shape (n_steps, N, 3), (N, 3), or (N,).
-            T : float, optional
-                Temperature. If None, uses self.T_mean if available.
-            mass : float, optional
-                Particle mass (LJ units: default 1.0).
-            n_bins : int, optional
-                Number of histogram bins.
-            stem : str, optional
-                Figure name stem; default uses 'vel_MB_{mode}'.
+            Maxwell–Boltzmann speed distribution in 3D:
+            f(v) = 4π ( m / (2π k_B T) )^{3/2} v^2 exp( - m v^2 / (2 k_B T) )
+            with k_B = 1 (LJ units).
             """
-            v = np.asarray(velocities)
+            k_B = 1.0
+            m_over_2kT = mass / (2.0 * k_B * T_local)
+            prefactor = 4.0 * np.pi * (m_over_2kT / np.pi) ** 1.5
+            return prefactor * v_vals**2 * np.exp(-m_over_2kT * v_vals**2)
 
-            # Convert to speeds
-            if v.ndim == 3:
-                # (n_steps, N, 3)
-                speeds = np.linalg.norm(v, axis=-1).ravel()
-            elif v.ndim == 2:
-                # (N, 3)
-                speeds = np.linalg.norm(v, axis=-1)
-            elif v.ndim == 1:
-                # already speeds
-                speeds = v
-            else:
-                raise ValueError(
-                    "velocities must have shape (n_steps, N, 3), (N, 3), or (N,)"
-                )
+        # -------------------- Handle shapes --------------------
+        # v: (n_steps, N, 3)
+        n_steps = v.shape[0]
 
-            # Temperature to use
-            if T is None:
-                if hasattr(self, "T_mean"):
-                    T_use = float(self.T_mean)
-                else:
-                    # estimate from velocities: <v^2> = 3 k_B T / m
-                    v2_mean = np.mean(speeds**2)
-                    T_use = v2_mean * mass / (3.0 * 1.0)  # k_B = 1 in LJ units
-            else:
-                T_use = float(T)
+        # Build slice edges from fractions
+        if frac_slices is None:
+            # default fractions: early, mid, late-ish, very late
+            frac_slices = [0.1, 0.6, 0.9]
 
-            # Build histogram
+        # Clean up and build edges in [0,1]
+        frac_slices = sorted(float(f) for f in frac_slices if 0.0 < f < 1.0)
+        edges = frac_slices
+
+        # Loop over slices
+        for i in range(len(edges) - 1):
+            f =  edges[i]
+            t = int(round(f * n_steps))
+            
+
+            v_slice = v[t:t+dt, :, :]  # (n_steps_slice, N, 3)
+            T_use = T[t:t+dt].mean()
+            speeds = np.linalg.norm(v_slice, axis=-1).ravel()
+
             fig, ax = plt.subplots()
 
             counts, bin_edges, _ = ax.hist(
                 speeds,
-                bins=n_bins,
+                bins=counts,
                 density=True,
                 alpha=0.6,
                 edgecolor="black",
                 label="MD speeds",
             )
 
-            # MB on bin centers
             v_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-            mb_pdf = maxwell_boltzmann_speed_pdf(v_centers, T=T_use, mass=mass, k_B=1.0)
+            mb_pdf = mb_speed_pdf(v_centers, T_use)
 
-            ax.plot(v_centers, mb_pdf, linewidth=2, label="Maxwell–Boltzmann")
+            ax.plot(
+                v_centers,
+                mb_pdf,
+                linewidth=2,
+                label=f"Maxwell–Boltzmann (T={T_use:.3f})",
+            )
 
             ax.set_xlabel(r"Speed $v$ (reduced units)")
             ax.set_ylabel(r"Probability density $f(v)$")
-            ax.set_title(f"{self.mode.upper()} - velocity distribution vs MB")
+            ax.set_title(
+                f"{self.mode.upper()} - velocity distribution vs MB"
+            )
             ax.legend()
-
             fig.tight_layout()
 
-            stem = stem or f"vel_MB_{self.mode}"
-            savefig(str(self.fig_dir), stem)
+            base_stem = stem or f"vel_MB_{self.mode}"
+            slice_stem = f"{base_stem}_f{t:.2f}-{t+dt:.2f}"
+            savefig(str(self.fig_dir), slice_stem)
 
             plt.close(fig)
 
@@ -526,39 +497,31 @@ class Analysis:
             savefig(out_dir, stem)
             plt.close()
     
+    # --------------------------------------------------
+    # Public API
+    # --------------------------------------------------
+    
+    def run_all(self):
+        """
+        Run the full analysis:
 
+        - Thermodynamics (T(t), energies)
+        - 3D g(r) and S(k)
 
+        For slabs (mode == "slab"), also:
+        - 1D density profile rho(z)
+        - slab scan: 2D g_xy(r) and 2D S_xy(k) for multiple z-slices
+        """
+        self._load_thermo()
+        self._load_structure()
 
-# ------------------------------------------------------
-# Backwards-compatible functional API
-# ------------------------------------------------------
+        self._plot_temperature_and_energy()
+        self._plot_gr_and_sk_3d()
 
-def analyze_trajectory(
-    mode: str,
-    data_dir,
-    out_dir,
-    rc: float,
-    nbins: int,
-    dr: float,
-    maxk: int,
-    inplane: bool = False,
-):
-    """
-    Backwards-compatible wrapper for old code calling:
-
-        analyze.analyze_trajectory(...)
-
-    Ignores 'inplane' (slab handling is automatic inside Analysis).
-
-    New preferred usage is to construct Analysis directly.
-    """
-    analyzer = Analysis(
-            mode=mode,
-            data_dir=data_dir,
-            fig_dir=out_dir,
-            rc=rc,
-            nbins=nbins,
-            dr=dr,
-            maxk=maxk,
-        )
-    analyzer.run_all()
+        if self.mode == "slab":
+            if self.enable_density_profile:
+                self._plot_density_profile_z()
+            if self.enable_slab_scan:
+                self._run_slab_scan()
+            if self.enable_vapor_pressure:
+                self._compute_vapor_pressure()
