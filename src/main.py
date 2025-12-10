@@ -18,7 +18,8 @@ from analyze import Analysis
 # Simulation parameters
 # =============================
 
-MODE = "bulk"   # or "slab"
+MODE = "slab" 
+#MODE = "bulk"  
 
 # --- Slab geometry (only used if MODE == "slab") ---
 CELLS_X   = 4
