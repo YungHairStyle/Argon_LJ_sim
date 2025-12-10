@@ -43,15 +43,10 @@ class Analysis:
     """
     High-level analysis class for LJ simulation results.
 
-    Typical usage (bulk):
-        analyzer = Analysis(mode="bulk", data_dir="data", fig_dir="figures/bulk")
-        analyzer.run_all()
-
-    Typical usage (slab, with default fancy stuff):
+    Typical usage:
         analyzer = Analysis(mode="slab", data_dir="data", fig_dir="figures/slab")
         analyzer.run_all()
-
-    You can override fancy parameters in __init__, but you rarely need to.
+        analyzer.plot_velocity_distribution_with_MB(dt=5, frac_slices=[0.1,0.6,0.9])
     """
 
     def __init__(
