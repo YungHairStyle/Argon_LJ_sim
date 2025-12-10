@@ -13,6 +13,7 @@ import os
 import csv
 import time
 import numpy as np
+import json
 from pathlib import Path
 
 from aux import (
@@ -210,8 +211,8 @@ class LJSimulation:
         with open(save_thermo, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["time", "E_pot", "E_kin", "T", "vels"])
-            for row in zip(times, epots, ekins, temps, vels):
-                w.writerow(row)
+            for t, ep, ek, T, v in zip(times, epots, ekins, temps, vels):
+                w.writerow([t, ep, ek, T, json.dumps(v.tolist())])
         print(f"[save] Wrote {save_thermo}")
 
         return {

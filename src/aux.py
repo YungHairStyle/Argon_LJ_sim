@@ -15,6 +15,8 @@ import os
 from typing import Tuple, List
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
+import json
 
 #############################
 # Box & minimum-image tools #
@@ -368,9 +370,11 @@ def block_average(tseries, nblocks=5):
 
 
 def read_thermo_csv(path: str):
-    """Read thermo_{mode}.csv produced by the simulation."""
-    data = np.genfromtxt(path, delimiter=",", names=True)
-    return data
+    df = pd.read_csv(path, engine="python")
+
+    df["vels"] = df["vels"].map(lambda s: np.array(json.loads(s)))
+
+    return df.to_records(index=False)
 
 
 def read_gro(path: str):

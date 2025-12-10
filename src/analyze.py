@@ -196,10 +196,17 @@ class Analysis:
         self._load_structure()
 
         velocities = self._thermo["vels"]
+        
         T = self._thermo["T"]
+  
 
 
-        v = np.asarray(velocities)
+        vels_raw = np.asarray(velocities)
+        
+        v_list = [np.asarray(step) for step in vels_raw]
+        v = np.stack(v_list, axis=0)  # -> (n_steps, N, 3)
+
+
 
         # -------------------- MB distribution helper --------------------
         def mb_speed_pdf(v_vals, T_local):
@@ -220,16 +227,15 @@ class Analysis:
         # Build slice edges from fractions
         if frac_slices is None:
             # default fractions: early, mid, late-ish, very late
-            frac_slices = [0.1, 0.6, 0.9]
+            frac_slices = [0.1, 0.6, 0.8]
 
         # Clean up and build edges in [0,1]
         frac_slices = sorted(float(f) for f in frac_slices if 0.0 < f < 1.0)
-        edges = frac_slices
 
         # Loop over slices
-        for i in range(len(edges) - 1):
-            f =  edges[i]
+        for f in frac_slices:
             t = int(round(f * n_steps))
+            t = max(0, min(t, n_steps - 1))
             
 
             v_slice = v[t:t+dt, :, :]  # (n_steps_slice, N, 3)
@@ -240,7 +246,7 @@ class Analysis:
 
             counts, bin_edges, _ = ax.hist(
                 speeds,
-                bins=counts,
+                bins="auto",
                 density=True,
                 alpha=0.6,
                 edgecolor="black",
@@ -355,74 +361,74 @@ class Analysis:
         savefig(out_dir, f"density_profile_z_{mode}")
         plt.close()
 
-        def _compute_vapor_pressure(self):
-            """
-            Estimate the vapor pressure from the slab by:
-            1) computing rho(z)
-            2) averaging rho over the 'vapor region' near the top of the box
-            3) using P_vap = rho_vap * <T> (ideal gas in reduced units).
-            """
-            if self.mode != "slab":
-                return
+    def _compute_vapor_pressure(self):
+        """
+        Estimate the vapor pressure from the slab by:
+        1) computing rho(z)
+        2) averaging rho over the 'vapor region' near the top of the box
+        3) using P_vap = rho_vap * <T> (ideal gas in reduced units).
+        """
+        if self.mode != "slab":
+            return
 
-            # Make sure we have thermo + structure loaded and <T> computed
-            if self._thermo is None:
-                self._load_thermo()
-            if self._pos is None or self._box is None:
-                self._load_structure()
+        # Make sure we have thermo + structure loaded and <T> computed
+        if self._thermo is None:
+            self._load_thermo()
+        if self._pos is None or self._box is None:
+            self._load_structure()
 
-            th = self._thermo
-            pos = self._pos
-            box = self._box
-            out_dir = str(self.fig_dir)
+        th = self._thermo
+        pos = self._pos
+        box = self._box
+        out_dir = str(self.fig_dir)
 
-            # If T_mean wasn't computed yet (e.g. vapor pressure called before thermo plot),
-            # compute it now.
-            if not hasattr(self, "T_mean"):
-                T_arr = th["T"]
-                T_mean, T_err = block_average(T_arr, nblocks=8)
-                self.T_mean = float(T_mean)
-                self.T_err = float(T_err)
+        # If T_mean wasn't computed yet (e.g. vapor pressure called before thermo plot),
+        # compute it now.
+        if not hasattr(self, "T_mean"):
+            T_arr = th["T"]
+            T_mean, T_err = block_average(T_arr, nblocks=8)
+            self.T_mean = float(T_mean)
+            self.T_err = float(T_err)
 
-            # 1D density profile rho(z)
-            zc, rho = density_profile_z(
-                pos,
-                box,
-                bin_width=self.density_bin_width,
-            )
+        # 1D density profile rho(z)
+        zc, rho = density_profile_z(
+            pos,
+            box,
+            bin_width=self.density_bin_width,
+        )
 
-            # Approximate Lz from bin centers + bin width
-            # last bin center is around Lz - dz/2
-            dz = self.density_bin_width
-            Lz_est = zc[-1] + 0.5 * dz
+        # Approximate Lz from bin centers + bin width
+        # last bin center is around Lz - dz/2
+        dz = self.density_bin_width
+        Lz_est = zc[-1] + 0.5 * dz
 
-            # Define vapor region as the top fraction of the box in z
-            frac = self.vapor_region_fraction
-            z_cut = (1.0 - frac) * Lz_est
-            vapor_mask = zc >= z_cut
+        # Define vapor region as the top fraction of the box in z
+        frac = self.vapor_region_fraction
+        z_cut = (1.0 - frac) * Lz_est
+        vapor_mask = zc >= z_cut
 
-            if not np.any(vapor_mask):
-                print("[vapor] No bins selected for vapor region; cannot compute vapor pressure.")
-                return
+        if not np.any(vapor_mask):
+            print("[vapor] No bins selected for vapor region; cannot compute vapor pressure.")
+            return
 
-            rho_vap = float(np.mean(rho[vapor_mask]))
-            P_vap = rho_vap * self.T_mean  # LJ reduced units, k_B = 1
-            self.vapor_pressure = P_vap
+        rho_vap = float(np.mean(rho[vapor_mask]))
+        P_vap = rho_vap * self.T_mean  # LJ reduced units, k_B = 1
+        self.vapor_pressure = P_vap
 
-            print(
-                f"[vapor] estimated vapor pressure P_vap ≈ {P_vap:.4f} "
-                f"(rho_vap={rho_vap:.4f}, <T>={self.T_mean:.4f}, "
-                f"vapor_region_fraction={frac:.2f})"
-            )
+        print(
+            f"[vapor] estimated vapor pressure P_vap ≈ {P_vap:.4f} "
+            f"(rho_vap={rho_vap:.4f}, <T>={self.T_mean:.4f}, "
+            f"vapor_region_fraction={frac:.2f})"
+        )
 
-            # Optionally write a tiny text file with the number
-            txt_path = Path(out_dir) / f"vapor_pressure_{self.mode}.txt"
-            with open(txt_path, "w") as f:
-                f.write("# Vapor pressure estimate (LJ reduced units)\n")
-                f.write(f"# rho_vap = {rho_vap:.8f}\n")
-                f.write(f"# <T>     = {self.T_mean:.8f}\n")
-                f.write(f"P_vap     = {P_vap:.8f}\n")
-            print(f"[vapor] wrote {txt_path}")
+        # Optionally write a tiny text file with the number
+        txt_path = Path(out_dir) / f"vapor_pressure_{self.mode}.txt"
+        with open(txt_path, "w") as f:
+            f.write("# Vapor pressure estimate (LJ reduced units)\n")
+            f.write(f"# rho_vap = {rho_vap:.8f}\n")
+            f.write(f"# <T>     = {self.T_mean:.8f}\n")
+            f.write(f"P_vap     = {P_vap:.8f}\n")
+        print(f"[vapor] wrote {txt_path}")
 
     # --------------------------------------------------
     # Slab scan: 2D g_xy(r) and 2D S_xy(k)
