@@ -1,0 +1,5 @@
+# Vapor pressure estimate (LJ reduced units)
+# rho_vap = 0.39795240
+# <T>     = 2.48396166
+P_vap     = 0.98849851
+P_err     = 0.08444149

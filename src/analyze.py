@@ -2,30 +2,20 @@
 """
 analyze.py
 
-High-level analysis for LJ MD outputs.
-
-Public API:
-
-    from analyze import Analysis
-
-    analyzer = Analysis(
-        mode="slab",
-        data_dir="data",
-        fig_dir="figures/slab",
-    )
-    analyzer.run_all()
-    analyzer.plot_velocity_distribution_with_MB()
+High-level analysis for LJ MD outputs with Error Bars.
+Report-Ready Version: Auto-Scaling Y-axis, Reduced Units, File Writing enabled.
 """
 
 import os
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
-from aux import (
+
+# Import helpers from your existing aux_analyze file
+from aux_analyze import (
     read_thermo_csv,
     read_gro,
     savefig,
-    block_average,
     all_dists,
     pair_correlation,       # 3D g(r)
     legal_kvecs,            # 3D k vectors
@@ -36,17 +26,47 @@ from aux import (
     legal_kvecs_2d,         # 2D k vectors
     calc_av_sk_2d,          # 2D S(k)
     slice_masks_by_z,
+    pair_correlation_slab_corrected,
 )
+
+
+# --- HELPER FUNCTION: READ TRAJECTORY ---
+def read_traj_gro(filename):
+    """
+    Generator that yields (pos, box) for every frame in a .gro trajectory.
+    """
+    with open(filename, 'r') as f:
+        while True:
+            line = f.readline() # Title
+            if not line: break 
+            
+            try:
+                natoms = int(f.readline().strip()) # Atom count
+            except ValueError:
+                break
+                
+            # Read positions
+            pos = []
+            for _ in range(natoms):
+                line = f.readline()
+                parts = line.split()
+                # Standard GRO: x,y,z are at -3, -2, -1
+                x = float(parts[-3])
+                y = float(parts[-2])
+                z = float(parts[-1])
+                pos.append([x, y, z])
+            
+            pos = np.array(pos)
+            
+            # Box vectors
+            box_line = f.readline().split()
+            Lx, Ly, Lz = float(box_line[0]), float(box_line[1]), float(box_line[2])
+            yield pos, np.array([Lx, Ly, Lz])
 
 
 class Analysis:
     """
     High-level analysis class for LJ simulation results.
-
-    Typical usage:
-        analyzer = Analysis(mode="slab", data_dir="data", fig_dir="figures/slab")
-        analyzer.run_all()
-        analyzer.plot_velocity_distribution_with_MB(dt=5, frac_slices=[0.1,0.6,0.9])
     """
 
     def __init__(
@@ -55,14 +75,12 @@ class Analysis:
         data_dir="data",
         fig_dir=None,
         *,
-        # core structure parameters
         rc: float = 2.5,
         nbins: int = 200,
         dr: float = 0.02,
         maxk: int = 15,
-        # fancy slab options
         enable_slab_scan: bool = True,
-        slice_thickness: float = 1.0,
+        slice_thickness: float = 0.5,
         slice_offsets=None,
         enable_density_profile: bool = True,
         density_bin_width: float = 0.2,
@@ -90,11 +108,8 @@ class Analysis:
 
         self.enable_density_profile = enable_density_profile
         self.density_bin_width = density_bin_width
-
         self.enable_vapor_pressure = enable_vapor_pressure
-        self.vapor_region_fraction = vapor_region_fraction  # top 20% of box by default
-        self.vapor_pressure = None  # will hold P_vap once computed
-
+        self.vapor_region_fraction = vapor_region_fraction
 
         os.makedirs(self.fig_dir, exist_ok=True)
 
@@ -103,426 +118,423 @@ class Analysis:
         self._box = None
 
     # --------------------------------------------------
-    # Internal loading
+    # MAIN EXECUTION
+    # --------------------------------------------------
+
+    def run_all(self):
+        """
+        Run the full analysis with Error Bars.
+        """
+        # 1. Load basic data
+        self._load_thermo()
+        self._load_structure() 
+
+        # 2. Thermo with Errors (Binned Time Series)
+        self.plot_thermo_with_error_bars(n_bins=50)
+
+        # 3. All Structure with Errors (g(r), S(k), Density, Vapor Pressure)
+        # skip_frac=0.2 ensures we ignore the lattice equilibration
+        self.compute_all_structure_errors(nblocks=5, skip_frac=0.2)
+        
+        # 4. Slab Scan with Errors
+        if self.mode == "slab" and self.enable_slab_scan:
+            self.compute_slab_scan_errors(nblocks=5, skip_frac=0.2)
+
+    # --------------------------------------------------
+    # NEW METHODS (ERROR BAR ANALYSIS)
+    # --------------------------------------------------
+
+    def plot_thermo_with_error_bars(self, n_bins=50):
+        """
+        Bins the time-series data (T, Energy) and plots means with error bars.
+        """
+        if self._thermo is None:
+            self._load_thermo()
+            
+        th = self._thermo
+        time = th["time"]
+        
+        quantities = [
+            ("Temperature", th["T"], "Temperature (reduced units)"),
+            ("Potential Energy", th["E_pot"], "Energy (reduced units)"),
+            ("Total Energy", th["E_pot"] + th["E_kin"], "Energy (reduced units)")
+        ]
+        
+        total_steps = len(time)
+        bin_size = max(1, total_steps // n_bins)
+        
+        for name, data, ylabel in quantities:
+            t_binned, y_mean, y_std = [], [], []
+            
+            for i in range(n_bins):
+                start = i * bin_size
+                end = start + bin_size
+                if start >= total_steps: break
+                
+                chunk = data[start:end]
+                t_chunk = time[start:end]
+                
+                if len(chunk) > 0:
+                    t_binned.append(np.mean(t_chunk))
+                    y_mean.append(np.mean(chunk))
+                    y_std.append(np.std(chunk)) 
+            
+            plt.figure()
+            plt.errorbar(t_binned, y_mean, yerr=y_std, fmt='-o', 
+                         capsize=3, label=f"Avg over {bin_size} steps")
+            plt.xlabel("Time (reduced units)")
+            plt.ylabel(ylabel)
+            plt.grid(alpha=0.3)
+            plt.legend()
+            
+            stem = name.replace(" ", "_").lower()
+            savefig(str(self.fig_dir), f"thermo_binned_{stem}")
+            plt.close()
+            print(f"[Thermo-Err] Saved {stem} plot.")
+
+    def compute_all_structure_errors(self, nblocks=5, skip_frac=0.2):
+        """
+        Reads trajectory ONCE.
+        Computes block averages and error bars for structure.
+        Saves Vapor Pressure to file for sweep.py.
+        """
+        traj_path = self.data_dir / f"argon_{self.mode}_traj.gro"
+        if not traj_path.exists():
+            print(f"Trajectory not found: {traj_path}")
+            return
+
+        print(f"\n[Master-Analysis] Reading trajectory for ALL structure errors...")
+        all_frames = list(read_traj_gro(str(traj_path)))
+        
+        start_idx = int(len(all_frames) * skip_frac)
+        frames = all_frames[start_idx:]
+        print(f"[Master-Analysis] Using {len(frames)} frames (skipped first {start_idx}).")
+        
+        if len(frames) == 0:
+            print("[Error] No frames left after skipping equilibration!")
+            return
+
+        # Setup Bins from Dummy Frame
+        dummy_pos, dummy_box = frames[0]
+        
+        # Naive g(r)
+        _, r_naive = pair_correlation(all_dists(dummy_pos, dummy_box, 'bulk'), 
+                                      len(dummy_pos), self.nbins, self.dr, dummy_box)
+        
+        # Corrected g(r) & Density setup
+        if self.mode == 'slab':
+            eff_thick = 9.0  # <--- THICKNESS (Check density profile if this needs tuning!)
+            s_nbins = int(3.0 / self.dr)
+            _, r_corr = pair_correlation_slab_corrected(all_dists(dummy_pos, dummy_box, 'slab'), 
+                                                        len(dummy_pos), s_nbins, self.dr, dummy_box, eff_thick)
+            zc_axis, _ = density_profile_z(dummy_pos, dummy_box, self.density_bin_width)
+        
+        # S(k) setup
+        kvecs = legal_kvecs(self.maxk, dummy_box)
+        kmod_axis, _ = calc_av_sk(kvecs, dummy_pos)
+        mask_k = kmod_axis > 1e-8
+        kmod_axis = kmod_axis[mask_k]
+
+        # Block Loop
+        block_size = len(frames) // nblocks
+        blocks_gr_naive = []
+        blocks_gr_corr = []
+        blocks_sk = []
+        blocks_rho = []
+
+        for b in range(nblocks):
+            b_frames = frames[b*block_size : (b+1)*block_size]
+            if len(b_frames) == 0: continue
+
+            acc_gr_naive = np.zeros_like(r_naive)
+            acc_sk = np.zeros_like(kmod_axis)
+            if self.mode == 'slab':
+                acc_gr_corr = np.zeros_like(r_corr)
+                acc_rho = np.zeros_like(zc_axis)
+
+            for pos, box in b_frames:
+                dists_mode = "slab" if self.mode == "slab" else "bulk"
+                dists = all_dists(pos, box, dists_mode)
+                
+                # Naive g(r)
+                g, _ = pair_correlation(dists, len(pos), self.nbins, self.dr, box)
+                acc_gr_naive += np.nan_to_num(g)
+                
+                # S(k)
+                _, sk_frame = calc_av_sk(kvecs, pos)
+                acc_sk += sk_frame[mask_k]
+                
+                if self.mode == 'slab':
+                    # Corrected g(r)
+                    gc, _ = pair_correlation_slab_corrected(dists, len(pos), s_nbins, self.dr, box, eff_thick)
+                    acc_gr_corr += np.nan_to_num(gc)
+                    # Density
+                    _, rho_frame = density_profile_z(pos, box, self.density_bin_width)
+                    acc_rho += rho_frame
+
+            # Normalize Block
+            n_in_block = len(b_frames)
+            blocks_gr_naive.append(acc_gr_naive / n_in_block)
+            blocks_sk.append(acc_sk / n_in_block)
+            if self.mode == 'slab':
+                blocks_gr_corr.append(acc_gr_corr / n_in_block)
+                blocks_rho.append(acc_rho / n_in_block)
+                
+            print(f"  Processed Block {b+1}/{nblocks}")
+
+        # Plotting Helper with Auto-Scale Logic
+        def plot_with_err(x, blocks, name, xlabel, ylabel, hline=None, zoom_k=False):
+            arr = np.array(blocks)
+            if arr.shape[0] < 2:
+                print(f"[Warning] Not enough blocks for error bars on {name}")
+                return None, None
+            
+            mean = np.mean(arr, axis=0)
+            std = np.std(arr, axis=0, ddof=1)
+            err = std / np.sqrt(nblocks)
+            
+            # 1. Standard Plot
+            plt.figure()
+            plt.plot(x, mean, color='tab:blue', label='Mean')
+            plt.fill_between(x, mean-err, mean+err, color='tab:blue', alpha=0.3, label='Std Err')
+            if hline: plt.axhline(hline, color='k', ls='--', alpha=0.4)
+            plt.xlabel(xlabel)
+            plt.ylabel(ylabel)
+            plt.legend()
+            safe_name = name.replace(" ", "_").lower().replace("(", "").replace(")", "")
+            savefig(str(self.fig_dir), f"ERR_{safe_name}")
+            plt.close()
+
+            # 2. Zoomed Plot (for S(k) usually)
+            if zoom_k:
+                plt.figure()
+                plt.plot(x, mean, color='tab:blue', label='Mean')
+                plt.fill_between(x, mean-err, mean+err, color='tab:blue', alpha=0.3, label='Std Err')
+                if hline: plt.axhline(hline, color='k', ls='--', alpha=0.4)
+                plt.xlabel(xlabel)
+                plt.ylabel(ylabel)
+                
+                # --- AUTO-SCALE LOGIC ---
+                # Define cutoff
+                cut_val = 2.5
+                plt.xlim(cut_val, np.max(x))
+                
+                # Find max Y in visible region to rescale Y-axis
+                visible_mask = x >= cut_val
+                if np.any(visible_mask):
+                    # We take max of (mean + error) to ensure everything fits
+                    y_max_visible = np.max(mean[visible_mask] + err[visible_mask])
+                    plt.ylim(0, y_max_visible * 1.1) # Add 10% padding
+                
+                plt.legend()
+                savefig(str(self.fig_dir), f"ERR_{safe_name}_zoomed")
+                plt.close()
+                
+            return mean, err
+
+        # Generate Plots
+        plot_with_err(r_naive, blocks_gr_naive, f"Naive g(r) {self.mode}", "r (reduced units)", "g(r)", 1.0)
+        
+        # S(k) with Zoom and Auto-Scale
+        plot_with_err(kmod_axis, blocks_sk, f"S(k) {self.mode}", "|k| (reduced units)", "S(k)", 1.0, zoom_k=True)
+        
+        if self.mode == 'slab':
+            plot_with_err(r_corr, blocks_gr_corr, "Corrected g(r)", "r (reduced units)", "g(r)", 1.0)
+            rho_mean, rho_err = plot_with_err(zc_axis, blocks_rho, "Density Profile", "z (reduced units)", "rho(z) (reduced units)")
+            
+            # Vapor Pressure Calculation
+            if rho_mean is not None:
+                Lz = zc_axis[-1] + self.density_bin_width/2
+                vap_mask = zc_axis > (0.8 * Lz)
+                
+                # Default init
+                P_vap, P_err = None, None
+                rho_vap_mean, T_mean = 0.0, 0.0
+
+                if np.any(vap_mask):
+                    rho_vap_mean = np.mean(rho_mean[vap_mask])
+                    rho_vap_err = np.mean(rho_err[vap_mask])
+                    
+                    if self._thermo is None: self._load_thermo()
+                    # Use only the frames we analyzed (after skip_frac)
+                    T_vals = self._thermo["T"][start_idx:]
+                    T_mean = np.mean(T_vals)
+                    T_err = np.std(T_vals, ddof=1) / np.sqrt(len(T_vals))
+                    
+                    P_vap = rho_vap_mean * T_mean
+                    frac_err = np.sqrt((rho_vap_err/rho_vap_mean)**2 + (T_err/T_mean)**2) if rho_vap_mean > 0 else 0
+                    P_err = P_vap * frac_err
+                    
+                    print(f"\n[Vapor Pressure] P = {P_vap:.5f} ± {P_err:.5f}")
+
+                # --- WRITE TO FILE FOR SWEEP.PY ---
+                txt_path = self.fig_dir / f"vapor_pressure_{self.mode}.txt"
+                with open(txt_path, "w") as f:
+                    f.write("# Vapor pressure estimate (LJ reduced units)\n")
+                    f.write(f"# rho_vap = {rho_vap_mean:.8f}\n")
+                    f.write(f"# <T>     = {T_mean:.8f}\n")
+                    if P_vap is not None:
+                        f.write(f"P_vap     = {P_vap:.8f}\n")
+                        f.write(f"P_err     = {P_err:.8f}\n")
+                    else:
+                        f.write("P_vap     = NaN\n")
+                print(f"[Vapor Pressure] Saved data to {txt_path}")
+
+
+    def compute_slab_scan_errors(self, nblocks=5, skip_frac=0.2):
+        """
+        Reads trajectory again to compute sliced 2D structure with error bars.
+        """
+        if self.mode != "slab" or not self.enable_slab_scan:
+            return
+
+        print(f"\n[Slab-Scan-Err] Reading trajectory for SLICING analysis...")
+        traj_path = self.data_dir / f"argon_{self.mode}_traj.gro"
+        all_frames = list(read_traj_gro(str(traj_path)))
+        
+        start_idx = int(len(all_frames) * skip_frac)
+        frames = all_frames[start_idx:]
+        print(f"[Slab-Scan-Err] Using {len(frames)} frames for slicing.")
+
+        if not frames: return
+
+        # Setup Axes from first frame
+        dummy_pos, dummy_box = frames[0]
+        Lx, Ly, _ = dummy_box
+        
+        # 2D g(r) axis setup
+        r_max = min(Lx, Ly) / 2.0
+        nbins_actual = int(min(self.nbins * self.dr, r_max) / self.dr)
+        edges = np.linspace(0, nbins_actual * self.dr, nbins_actual + 1)
+        r_axis = 0.5 * (edges[:-1] + edges[1:])
+        
+        # 2D S(k) axis setup
+        kvecs2d = legal_kvecs_2d(self.maxk, dummy_box)
+        kmod2d, _ = calc_av_sk_2d(kvecs2d, dummy_pos)
+        mask_k = kmod2d > 1e-8
+        kmod_axis = kmod2d[mask_k]
+
+        n_offsets = len(self.slice_offsets)
+        # Storage: lists of block averages
+        blocks_gr = [[[] for _ in range(nblocks)] for _ in range(n_offsets)] 
+        blocks_sk = [[[] for _ in range(nblocks)] for _ in range(n_offsets)]
+
+        block_size = len(frames) // nblocks
+
+        for b in range(nblocks):
+            b_frames = frames[b*block_size : (b+1)*block_size]
+            if not b_frames: continue
+            
+            # Accumulate this block
+            acc_gr = np.zeros((n_offsets, len(r_axis)))
+            acc_sk = np.zeros((n_offsets, len(kmod_axis)))
+            counts = np.zeros(n_offsets, dtype=int)
+
+            for pos, box in b_frames:
+                masks = slice_masks_by_z(pos, box, self.slice_thickness, self.slice_offsets)
+                kvecs2d_frame = legal_kvecs_2d(self.maxk, box)
+
+                for i, mask in enumerate(masks):
+                    slice_pos = pos[mask]
+                    if len(slice_pos) < 5: continue
+                    
+                    # g(r)
+                    d2 = compute_2d_distances(slice_pos, box)
+                    g, _ = pair_correlation_2d(d2, len(slice_pos), self.nbins, self.dr, box)
+                    
+                    # S(k)
+                    _, sk_raw = calc_av_sk_2d(kvecs2d_frame, slice_pos)
+                    sk = sk_raw[mask_k]
+
+                    if len(g) == len(r_axis):
+                        acc_gr[i] += np.nan_to_num(g)
+                    if len(sk) == len(kmod_axis):
+                        acc_sk[i] += sk
+                    counts[i] += 1
+
+            # Store averages
+            for i in range(n_offsets):
+                if counts[i] > 0:
+                    blocks_gr[i][b] = acc_gr[i] / counts[i]
+                    blocks_sk[i][b] = acc_sk[i] / counts[i]
+                else:
+                    blocks_gr[i][b] = np.zeros(len(r_axis))
+                    blocks_sk[i][b] = np.zeros(len(kmod_axis))
+            
+            print(f"  [Slab-Scan] Processed Block {b+1}/{nblocks}")
+
+        # Plotting with Error Bars
+        for i, offset in enumerate(self.slice_offsets):
+            stem_safe = f"{offset:.2f}".replace(".", "p")
+            
+            # 1. Plot g(r)
+            data_gr = np.array(blocks_gr[i])
+            mean_gr = np.mean(data_gr, axis=0)
+            std_gr = np.std(data_gr, axis=0, ddof=1)
+            err_gr = std_gr / np.sqrt(nblocks)
+
+            plt.figure()
+            plt.plot(r_axis, mean_gr, color='tab:orange', label='Mean')
+            plt.fill_between(r_axis, mean_gr - err_gr, mean_gr + err_gr, color='tab:orange', alpha=0.3, label='Std Err')
+            plt.axhline(1.0, color="k", linestyle="--", alpha=0.4)
+            plt.xlabel("r_xy (reduced units)")
+            plt.ylabel("g_xy(r)")
+            plt.legend()
+            savefig(str(self.fig_dir), f"ERR_slice_gr_offset_{stem_safe}")
+            plt.close()
+
+            # 2. Plot S(k) - Normal
+            data_sk = np.array(blocks_sk[i])
+            mean_sk = np.mean(data_sk, axis=0)
+            std_sk = np.std(data_sk, axis=0, ddof=1)
+            err_sk = std_sk / np.sqrt(nblocks)
+
+            plt.figure()
+            plt.plot(kmod_axis, mean_sk, color='tab:orange', label='Mean')
+            plt.fill_between(kmod_axis, mean_sk - err_sk, mean_sk + err_sk, color='tab:orange', alpha=0.3, label='Std Err')
+            plt.axhline(1.0, color="k", linestyle="--", alpha=0.4)
+            plt.xlabel("|k_xy| (reduced units)")
+            plt.ylabel("S_xy(k)")
+            plt.legend()
+            savefig(str(self.fig_dir), f"ERR_slice_sk_offset_{stem_safe}")
+            plt.close()
+
+            # 3. Plot S(k) - Zoomed & Auto-Scaled
+            plt.figure()
+            plt.plot(kmod_axis, mean_sk, color='tab:orange', label='Mean')
+            plt.fill_between(kmod_axis, mean_sk - err_sk, mean_sk + err_sk, color='tab:orange', alpha=0.3, label='Std Err')
+            plt.axhline(1.0, color="k", linestyle="--", alpha=0.4)
+            plt.xlabel("|k_xy| (reduced units)")
+            plt.ylabel("S_xy(k)")
+            
+            # Zoom Logic
+            cut_val = 2.5
+            plt.xlim(cut_val, np.max(kmod_axis))
+            
+            # Auto-Scale Y Logic
+            visible_mask = kmod_axis >= cut_val
+            if np.any(visible_mask):
+                y_max_vis = np.max(mean_sk[visible_mask] + err_sk[visible_mask])
+                plt.ylim(0, y_max_vis * 1.1)
+
+            plt.legend()
+            savefig(str(self.fig_dir), f"ERR_slice_sk_offset_{stem_safe}_zoomed")
+            plt.close()
+            
+            print(f"[Slab-Scan-Err] Saved plots (normal + zoomed) for offset {offset}")
+
+    # --------------------------------------------------
+    # UTILS / LOADING
     # --------------------------------------------------
 
     def _load_thermo(self):
-        if self._thermo is not None:
-            return
+        if self._thermo is not None: return
         path = self.data_dir / f"thermo_{self.mode}.csv"
-        if not path.is_file():
-            raise FileNotFoundError(f"Cannot find thermo file: {path}")
         self._thermo = read_thermo_csv(str(path))
 
     def _load_structure(self):
-        if self._pos is not None and self._box is not None:
-            return
+        if self._pos is not None: return
         path = self.data_dir / f"argon_{self.mode}.gro"
-        if not path.is_file():
-            raise FileNotFoundError(f"Cannot find structure file: {path}")
         _, pos, box = read_gro(str(path))
         self._pos = pos
         self._box = box
-
-    # --------------------------------------------------
-    # Thermodynamics
-    # --------------------------------------------------
-
-    def _plot_temperature_and_energy(self):
-        th = self._thermo
-        mode = self.mode
-        out_dir = str(self.fig_dir)
-
-        time_arr = th["time"]
-        T_arr = th["T"]
-        Ep = th["E_pot"]
-        Ek = th["E_kin"]
-        Etot = Ep + Ek
-
-        # Temperature vs time
-        plt.figure()
-        plt.plot(time_arr, T_arr)
-        plt.xlabel("time (MD units)")
-        plt.ylabel("Temperature")
-        plt.title(f"{mode.upper()} - T(t)")
-        savefig(out_dir, f"T_vs_time_{mode}")
-        plt.close()
-
-        # Energies vs time
-        plt.figure()
-        plt.plot(time_arr, Ep, label="E_pot")
-        plt.plot(time_arr, Ek, label="E_kin")
-        plt.plot(time_arr, Etot, label="E_tot")
-        plt.xlabel("time (MD units)")
-        plt.ylabel("Energy")
-        plt.title(f"{mode.upper()} - energies vs time")
-        plt.legend()
-        savefig(out_dir, f"E_vs_time_{mode}")
-        plt.close()
-
-        # Block averages
-        T_mean, T_err = block_average(T_arr, nblocks=8)
-        E_mean, E_err = block_average(Etot, nblocks=8)
-
-        # store for later use (vapor pressure)
-        self.T_mean = float(T_mean)
-        self.T_err = float(T_err)
-        self.Etot_mean = float(E_mean)
-        self.Etot_err = float(E_err)
-
-        print(
-            f"[thermo] {mode}: <T> = {self.T_mean:.4f} ± {self.T_err:.4f}, "
-            f"<E_tot> = {self.Etot_mean:.4f} ± {self.Etot_err:.4f}"
-        )
-
-
-        # --------------------------------------------------
-        # Velocity distribution with Maxwell–Boltzmann overlay
-        # --------------------------------------------------
-        
-    def plot_velocity_distribution_with_MB(
-        self,
-        dt: int = 5,
-        mass: float = 1.0,
-        frac_slices=None,
-    ):
-        """
-        Plot histograms of speeds from a velocity array and overlay
-        the Maxwell Boltzmann speed distribution for one or more
-        time windows.
-        """
-
-        self._load_thermo()
-        self._load_structure()
-
-        velocities = self._thermo["vels"]
-        
-        T = self._thermo["T"]
-  
-
-
-        vels_raw = np.asarray(velocities)
-        
-        v_list = [np.asarray(step) for step in vels_raw]
-        v = np.stack(v_list, axis=0)  # -> (n_steps, N, 3)
-
-
-
-        # -------------------- MB distribution helper --------------------
-        def mb_speed_pdf(v_vals, T_local):
-            """
-            Maxwell Boltzmann speed distribution in 3D:
-            f(v) = 4π ( m / (2π k_B T) )^{3/2} v^2 exp( - m v^2 / (2 k_B T) )
-            with k_B = 1 (LJ units).
-            """
-            k_B = 1.0
-            m_over_2kT = mass / (2.0 * k_B * T_local)
-            prefactor = 4.0 * np.pi * (m_over_2kT / np.pi) ** 1.5
-            return prefactor * v_vals**2 * np.exp(-m_over_2kT * v_vals**2)
-
-        # -------------------- Handle shapes --------------------
-        # v: (n_steps, N, 3)
-        n_steps = v.shape[0]
-
-        # Build slice edges from fractions
-        if frac_slices is None:
-            # default fractions: early, mid, late-ish, very late
-            frac_slices = [0.1, 0.6, 0.8]
-
-        # Clean up and build edges in [0,1]
-        frac_slices = sorted(float(f) for f in frac_slices if 0.0 < f < 1.0)
-
-        # Loop over slices
-        for f in frac_slices:
-            t = int(round(f * n_steps))
-            t = max(0, min(t, n_steps - 1))
-            
-
-            v_slice = v[t:t+dt, :, :]  # (n_steps_slice, N, 3)
-            T_use = T[t:t+dt].mean()
-            speeds = np.linalg.norm(v_slice, axis=-1).ravel()
-
-            fig, ax = plt.subplots()
-
-            counts, bin_edges, _ = ax.hist(
-                speeds,
-                bins="auto",
-                density=True,
-                alpha=0.6,
-                edgecolor="black",
-                label="MD speeds",
-            )
-
-            v_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-            mb_pdf = mb_speed_pdf(v_centers, T_use)
-
-            ax.plot(
-                v_centers,
-                mb_pdf,
-                linewidth=2,
-                label=f"Maxwell–Boltzmann (T={T_use:.3f})",
-            )
-
-            ax.set_xlabel(r"Speed $v$ (reduced units)")
-            ax.set_ylabel(r"Probability density $f(v)$")
-            ax.set_title(
-                f"{self.mode.upper()} - velocity distribution vs MB"
-            )
-            ax.legend()
-            fig.tight_layout()
-
-            base_stem = f"vel_MB_{self.mode}"
-            slice_stem = f"{base_stem}_f{t:.2f}-{t+dt:.2f}"
-            savefig(str(self.fig_dir), slice_stem)
-
-            plt.close(fig)
-
-    # --------------------------------------------------
-    # 3D structure: g(r) and S(k)
-    # --------------------------------------------------
-
-    def _plot_gr_and_sk_3d(self):
-        mode = self.mode
-        out_dir = str(self.fig_dir)
-        pos = self._pos
-        box = self._box
-
-        # 3D distances and g(r)
-        dists = all_dists(
-            pos,
-            box,
-            mode="bulk" if mode == "bulk" else "slab",
-        )
-        g, r = pair_correlation(
-            dists,
-            natom=len(pos),
-            nbins=self.nbins,
-            dr=self.dr,
-            L=box,
-        )
-
-        # 3D S(k)
-        kvecs = legal_kvecs(self.maxk, box)
-        kmod, avsk = calc_av_sk(kvecs, pos)
-
-        # Drop k=0 if present
-        mask = kmod > 1e-8
-        kmod = kmod[mask]
-        avsk = avsk[mask]
-
-        fig, ax = plt.subplots(1, 2, figsize=(12, 5))
-
-        # g(r)
-        ax[0].plot(r, g)
-        ax[0].axhline(1.0, color="k", linestyle="--", alpha=0.4)
-        ax[0].set_xlabel(r"$r$")
-        ax[0].set_ylabel(r"$g(r)$")
-        ax[0].set_title(f"{mode.upper()} - 3D $g(r)$")
-        ax[0].set_ylim(0, max(2.5, np.max(g) * 1.1))
-
-        # S(k)
-        ax[1].plot(kmod, avsk)
-        ax[1].axhline(1.0, color="k", linestyle="--", alpha=0.4)
-        ax[1].set_xlabel(r"$|k|$")
-        ax[1].set_ylabel(r"$S(k)$")
-        ax[1].set_title(f"{mode.upper()} - 3D $S(k)$")
-        ax[1].set_xlim(0, self.maxk)
-        ax[1].set_ylim(0, max(2.5, np.max(avsk) * 1.1))
-
-        plt.tight_layout()
-        savefig(out_dir, f"structure_3d_{mode}")
-        plt.close()
-
-    # --------------------------------------------------
-    # Density profile (slab)
-    # --------------------------------------------------
-
-    def _plot_density_profile_z(self):
-        mode = self.mode
-        if mode != "slab":
-            return
-
-        out_dir = str(self.fig_dir)
-        pos = self._pos
-        box = self._box
-
-        zc, rho = density_profile_z(
-            pos,
-            box,
-            bin_width=self.density_bin_width,
-        )
-
-        plt.figure()
-        plt.plot(zc, rho)
-        plt.xlabel(r"$z$")
-        plt.ylabel(r"$\rho(z)$")
-        plt.title(f"{mode.upper()} - density profile along z")
-        plt.grid(alpha=0.3)
-        savefig(out_dir, f"density_profile_z_{mode}")
-        plt.close()
-
-    def _compute_vapor_pressure(self):
-        """
-        Estimate the vapor pressure from the slab by:
-        1) computing rho(z)
-        2) averaging rho over the 'vapor region' near the top of the box
-        3) using P_vap = rho_vap * <T> (ideal gas in reduced units).
-        """
-        if self.mode != "slab":
-            return
-
-        # Make sure we have thermo + structure loaded and <T> computed
-        if self._thermo is None:
-            self._load_thermo()
-        if self._pos is None or self._box is None:
-            self._load_structure()
-
-        th = self._thermo
-        pos = self._pos
-        box = self._box
-        out_dir = str(self.fig_dir)
-
-        # If T_mean wasn't computed yet (e.g. vapor pressure called before thermo plot),
-        # compute it now.
-        if not hasattr(self, "T_mean"):
-            T_arr = th["T"]
-            T_mean, T_err = block_average(T_arr, nblocks=8)
-            self.T_mean = float(T_mean)
-            self.T_err = float(T_err)
-
-        # 1D density profile rho(z)
-        zc, rho = density_profile_z(
-            pos,
-            box,
-            bin_width=self.density_bin_width,
-        )
-
-        # Approximate Lz from bin centers + bin width
-        # last bin center is around Lz - dz/2
-        dz = self.density_bin_width
-        Lz_est = zc[-1] + 0.5 * dz
-
-        # Define vapor region as the top fraction of the box in z
-        frac = self.vapor_region_fraction
-        z_cut = (1.0 - frac) * Lz_est
-        vapor_mask = zc >= z_cut
-
-        if not np.any(vapor_mask):
-            print("[vapor] No bins selected for vapor region; cannot compute vapor pressure.")
-            return
-
-        rho_vap = float(np.mean(rho[vapor_mask]))
-        P_vap = rho_vap * self.T_mean  # LJ reduced units, k_B = 1
-        self.vapor_pressure = P_vap
-
-        print(
-            f"[vapor] estimated vapor pressure P_vap ≈ {P_vap:.4f} "
-            f"(rho_vap={rho_vap:.4f}, <T>={self.T_mean:.4f}, "
-            f"vapor_region_fraction={frac:.2f})"
-        )
-
-        # Optionally write a tiny text file with the number
-        txt_path = Path(out_dir) / f"vapor_pressure_{self.mode}.txt"
-        with open(txt_path, "w") as f:
-            f.write("# Vapor pressure estimate (LJ reduced units)\n")
-            f.write(f"# rho_vap = {rho_vap:.8f}\n")
-            f.write(f"# <T>     = {self.T_mean:.8f}\n")
-            f.write(f"P_vap     = {P_vap:.8f}\n")
-        print(f"[vapor] wrote {txt_path}")
-
-    # --------------------------------------------------
-    # Slab scan: 2D g_xy(r) and 2D S_xy(k)
-    # --------------------------------------------------
-
-    def _run_slab_scan(self):
-        mode = self.mode
-        if mode != "slab":
-            return
-
-        pos = self._pos
-        box = self._box
-        out_dir = str(self.fig_dir)
-
-        print("\n=== Slab scan: in-plane structure at various z offsets ===\n")
-
-        masks = slice_masks_by_z(
-            pos,
-            box,
-            slice_thickness=self.slice_thickness,
-            offsets=self.slice_offsets,
-        )
-
-        for offset, mask in zip(self.slice_offsets, masks):
-            slice_pos = pos[mask]
-            n_slice = slice_pos.shape[0]
-            if n_slice < 10:
-                print(f"[slab-scan] offset {offset:.2f}: slice too thin (N={n_slice}), skipping.")
-                continue
-
-            print(f"[slab-scan] offset {offset:.2f}: N={n_slice}")
-
-            # 2D g(r)
-            d2 = compute_2d_distances(slice_pos, box)
-            g2d, r2d = pair_correlation_2d(
-                d2,
-                natom=n_slice,
-                nbins=self.nbins,
-                dr=self.dr,
-                box=box,
-            )
-
-            # 2D S(k)
-            kvecs2d = legal_kvecs_2d(self.maxk, box)
-            kmod2d, S2d = calc_av_sk_2d(kvecs2d, slice_pos)
-            maskk = kmod2d > 1e-8
-            kmod2d = kmod2d[maskk]
-            S2d = S2d[maskk]
-
-            # Plot for this slice
-            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-            axes[0].plot(r2d, g2d)
-            axes[0].axhline(1.0, color="k", linestyle="--", alpha=0.4)
-            axes[0].set_xlabel(r"$r_{xy}$")
-            axes[0].set_ylabel(r"$g_{xy}(r)$")
-            axes[0].set_title(f"offset={offset:.2f} - $g_{{xy}}(r)$")
-
-            axes[1].plot(kmod2d, S2d)
-            axes[1].axhline(1.0, color="k", linestyle="--", alpha=0.4)
-            axes[1].set_xlabel(r"$|k_{xy}|$")
-            axes[1].set_ylabel(r"$S_{xy}(k)$")
-            axes[1].set_title(f"offset={offset:.2f} - $S_{{xy}}(k)$")
-
-            plt.tight_layout()
-            stem = f"slab_scan_offset_{offset:.2f}".replace(".", "p")
-            savefig(out_dir, stem)
-            plt.close()
-    
-    # --------------------------------------------------
-    # Public API
-    # --------------------------------------------------
-    
-    def run_all(self):
-        """
-        Run the full analysis:
-
-        - Thermodynamics (T(t), energies)
-        - 3D g(r) and S(k)
-
-        For slabs (mode == "slab"), also:
-        - 1D density profile rho(z)
-        - slab scan: 2D g_xy(r) and 2D S_xy(k) for multiple z-slices
-        """
-        self._load_thermo()
-        self._load_structure()
-
-        self._plot_temperature_and_energy()
-        self._plot_gr_and_sk_3d()
-
-        if self.mode == "slab":
-            if self.enable_density_profile:
-                self._plot_density_profile_z()
-            if self.enable_slab_scan:
-                self._run_slab_scan()
-            if self.enable_vapor_pressure:
-                self._compute_vapor_pressure()
